@@ -161,9 +161,8 @@ chosen_pn = chosen_label.split(" — ")[0]
 
 board_row = notices[notices["PCB P/N"] == chosen_pn].iloc[0]
 
-smt_steps = ["Loader", "Printer", "SPI/Pre-AOI/Post AOI", "Mounter", "Side Insert",
-             "Reflow", "Router", "AXI", "Final-AOI"]
-dip_steps = ["Auto-Insertion", "Wave solder", "Press-fit"]
+smt_steps = ["Loader", "Printer", "SPI/Pre-AOI/Post AOI", "Mounter", "Side Insert", "Reflow"]
+dip_steps = ["Router", "Auto-Insertion", "Wave solder", "Press-fit", "AXI", "Final-AOI"]
 
 
 def render_flow(steps, row):
@@ -184,6 +183,34 @@ def render_flow(steps, row):
 st.markdown("*SMT:*  " + render_flow(smt_steps, board_row), unsafe_allow_html=True)
 st.write("")
 st.markdown("*DIP:*  " + render_flow(dip_steps, board_row), unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ---- 4b. FIND BOARDS BY PROCESS STEP ----
+st.markdown('<div class="block-card">', unsafe_allow_html=True)
+st.markdown("**Find boards by process step**")
+st.caption("Pick a process step to see every model/board that runs through it.")
+
+step_choice = st.selectbox("Process step", process_cols)
+
+step_boards = (
+    notices[notices[step_choice] == True]
+    [["Customer", "Model", "PCB Board Name", "PCB P/N"]]
+    .drop_duplicates()
+    .rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"})
+    .sort_values(["Customer", "Model"])
+)
+
+st.write(f"**{len(step_boards)}** board(s) use **{step_choice}**")
+
+st.download_button(
+    label=f"⬇ Download boards using {step_choice} (CSV)",
+    data=step_boards.to_csv(index=False).encode("utf-8"),
+    file_name=f"boards_using_{step_choice.replace('/', '-')}.csv",
+    mime="text/csv",
+    key="download_by_step",
+)
+
+st.dataframe(step_boards, use_container_width=True, hide_index=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ---- 5. FILTERABLE NOTICE RECORDS TABLE ----
