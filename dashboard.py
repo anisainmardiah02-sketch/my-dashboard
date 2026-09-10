@@ -1,11 +1,40 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="SMT Masterlist Dashboard", layout="wide")
-st.title("🏭 SMT Masterlist Dashboard")
+st.set_page_config(page_title="PCB Notice Dashboard", layout="wide")
 
-# ---- 1. UPLOAD FILE (not stored on GitHub, kept private) ----
+# ---- DARK THEME STYLING ----
+st.markdown("""
+<style>
+.stApp { background-color: #0d1117; }
+.eyebrow { color: #f2643a; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.05em; }
+.subtitle { color: #9ca3af; font-size: 0.95rem; margin-top: -0.5rem; }
+div[data-testid="stMetric"] {
+    background-color: #161b26;
+    border: 1px solid #262d3a;
+    border-radius: 10px;
+    padding: 1rem 1.2rem;
+}
+div[data-testid="stMetric"] label { color: #9ca3af !important; }
+div[data-testid="stMetricValue"] { color: #f2643a; }
+.block-card {
+    background-color: #161b26;
+    border: 1px solid #262d3a;
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    margin-bottom: 1rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="eyebrow">SMT MASTERLIST · ENGINEERING NOTICES</div>', unsafe_allow_html=True)
+st.markdown("# PCB Notice Dashboard")
+st.markdown('<div class="subtitle">Every board revision flagged with an active change notice, broken down by customer and production line.</div>', unsafe_allow_html=True)
+st.write("")
+
+# ---- 1. UPLOAD FILE ----
 uploaded_file = st.file_uploader("Upload your PCBA Notice Information Excel file", type=["xlsx"])
 
 if not uploaded_file:
@@ -28,65 +57,122 @@ def load_data(file):
 
     df = df.dropna(subset=["SMT P/N"])
 
-    station_cols = []
+    # Build a long-format "notices" table: one row per active station flag
+    records = []
     for i in range(1, 21):
         scol = f"S{i}"
         rcol = "REV" if i == 1 else f"REV.{i - 1}"
-        if scol in df.columns:
-            station_cols.append((scol, rcol))
+        if scol not in df.columns:
+            continue
+        active = df[scol].fillna(0).astype(bool)
+        sub = df[active][["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", rcol]].copy()
+        sub["Line"] = f"S{i}"
+        sub = sub.rename(columns={rcol: "Rev"})
+        records.append(sub)
 
-    return df, station_cols
+    notices = pd.concat(records, ignore_index=True) if records else pd.DataFrame()
+    return notices
 
 
-df, station_cols = load_data(uploaded_file)
+notices = load_data(uploaded_file)
 
-# ---- 2. SIDEBAR FILTERS ----
-st.sidebar.header("Filters")
-customers = st.sidebar.multiselect("Customer", sorted(df["Customer"].dropna().unique()),
-                                    default=sorted(df["Customer"].dropna().unique()))
-models = st.sidebar.multiselect("Model", sorted(df["Model"].dropna().unique()),
-                                 default=sorted(df["Model"].dropna().unique()))
+# Sort lines numerically (S1, S2, ... S20) instead of alphabetically
+line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 
-filtered = df[df["Customer"].isin(customers) & df["Model"].isin(models)]
+# ---- 2. KPI METRICS ----
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Total notices", len(notices))
+k2.metric("Boards affected", notices["PCB P/N"].nunique())
+k3.metric("Customers", notices["Customer"].nunique())
+k4.metric("Active lines", notices["Line"].nunique())
 
-# ---- 3. KPI METRICS ----
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Parts", len(filtered))
-col2.metric("Customers", filtered["Customer"].nunique())
-col3.metric("Models", filtered["Model"].nunique())
-col4.metric("Unique Boards", filtered["PCB P/N"].nunique())
+st.write("")
 
-st.divider()
-
-# ---- 4. OVERVIEW CHARTS ----
-left, right = st.columns(2)
+# ---- 3. HEATMAP + SIDE BARS ----
+left, right = st.columns([2, 1])
 
 with left:
-    by_customer = filtered.groupby("Customer").size().reset_index(name="Parts")
-    fig1 = px.bar(by_customer, x="Customer", y="Parts", title="Parts by Customer")
-    st.plotly_chart(fig1, use_container_width=True)
+    st.markdown('<div class="block-card">', unsafe_allow_html=True)
+    st.markdown("**Notices by customer × line**")
+    st.caption("Darker = more notices.")
+
+    pivot = notices.pivot_table(index="Customer", columns="Line", values="Line",
+                                 aggfunc="count", fill_value=0)
+    pivot = pivot.reindex(columns=line_order, fill_value=0)
+
+    fig = px.imshow(
+        pivot.values,
+        x=pivot.columns,
+        y=pivot.index,
+        text_auto=True,
+        color_continuous_scale="Oranges",
+        aspect="auto",
+    )
+    fig.update_layout(
+        plot_bgcolor="#161b26", paper_bgcolor="#161b26",
+        font_color="#e5e7eb",
+        coloraxis_showscale=False,
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with right:
-    by_model = filtered.groupby("Model").size().reset_index(name="Parts").sort_values("Parts", ascending=False).head(15)
-    fig2 = px.bar(by_model, x="Model", y="Parts", title="Parts by Model (Top 15)")
-    fig2.update_layout(xaxis_tickangle=-45)
+    st.markdown('<div class="block-card">', unsafe_allow_html=True)
+    st.markdown("**Notices by customer**")
+    by_cust = notices.groupby("Customer").size().sort_values(ascending=True)
+    fig2 = go.Figure(go.Bar(x=by_cust.values, y=by_cust.index, orientation="h",
+                             marker_color="#f2643a", text=by_cust.values, textposition="outside"))
+    fig2.update_layout(
+        plot_bgcolor="#161b26", paper_bgcolor="#161b26", font_color="#e5e7eb",
+        margin=dict(l=0, r=0, t=10, b=0), height=180,
+        xaxis=dict(visible=False), yaxis=dict(showgrid=False),
+    )
     st.plotly_chart(fig2, use_container_width=True)
 
-# ---- 5. STATION USAGE ----
-st.subheader("Station Usage (S1–S20)")
+    st.markdown("**Top lines by volume**")
+    by_line = notices.groupby("Line").size().sort_values(ascending=False).head(8).sort_values(ascending=True)
+    fig3 = go.Figure(go.Bar(x=by_line.values, y=by_line.index, orientation="h",
+                             marker_color="#3b82f6", text=by_line.values, textposition="outside"))
+    fig3.update_layout(
+        plot_bgcolor="#161b26", paper_bgcolor="#161b26", font_color="#e5e7eb",
+        margin=dict(l=0, r=0, t=10, b=0), height=260,
+        xaxis=dict(visible=False), yaxis=dict(showgrid=False),
+    )
+    st.plotly_chart(fig3, use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-usage_rows = []
-for scol, rcol in station_cols:
-    active = filtered[scol].fillna(0).astype(bool)
-    usage_rows.append({"Station": scol, "Active Parts": int(active.sum())})
+# ---- 4. FILTERABLE NOTICE RECORDS TABLE ----
+st.markdown('<div class="block-card">', unsafe_allow_html=True)
+st.markdown("**Notice records**")
+st.caption("Search by board, part number, model, or rev.")
 
-usage_df = pd.DataFrame(usage_rows)
-fig3 = px.bar(usage_df, x="Station", y="Active Parts", title="Number of Parts Using Each Station")
-st.plotly_chart(fig3, use_container_width=True)
+f1, f2, f3 = st.columns([1, 1, 2])
+with f1:
+    cust_filter = st.selectbox("Customer", ["All customers"] + sorted(notices["Customer"].unique()))
+with f2:
+    line_filter = st.selectbox("Line", ["All lines"] + line_order)
+with f3:
+    search = st.text_input("Search board, model, P/N, rev...", "")
 
-# ---- 6. DETAIL TABLE ----
-st.subheader("Part Details")
-display_cols = ["Customer", "Model", "PCB Board Name", "PCB P/N", "PCB REV", "Side",
-                 "SMT P/N", "DIP P/N", "FG P/N", "PCS/PANEL", "Line Summary"]
-display_cols = [c for c in display_cols if c in filtered.columns]
-st.dataframe(filtered[display_cols], use_container_width=True)
+table = notices.copy()
+if cust_filter != "All customers":
+    table = table[table["Customer"] == cust_filter]
+if line_filter != "All lines":
+    table = table[table["Line"] == line_filter]
+if search:
+    s = search.lower()
+    mask = (
+        table["PCB Board Name"].astype(str).str.lower().str.contains(s)
+        | table["Model"].astype(str).str.lower().str.contains(s)
+        | table["PCB P/N"].astype(str).str.lower().str.contains(s)
+        | table["Rev"].astype(str).str.lower().str.contains(s)
+    )
+    table = table[mask]
+
+display_cols = ["Customer", "Model", "PCB Board Name", "PCB P/N", "Line", "Rev"]
+st.dataframe(
+    table[display_cols].rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"}),
+    use_container_width=True, hide_index=True,
+)
+st.markdown("</div>", unsafe_allow_html=True)
