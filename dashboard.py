@@ -5,23 +5,24 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="PCB Notice Dashboard", layout="wide")
 
-# ---- DARK THEME STYLING ----
+# ---- NUDE THEME STYLING ----
 st.markdown("""
 <style>
-.stApp { background-color: #0d1117; }
-.eyebrow { color: #f2643a; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.05em; }
-.subtitle { color: #9ca3af; font-size: 0.95rem; margin-top: -0.5rem; }
+.stApp { background-color: #f5ede4; }
+.eyebrow { color: #b5654a; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.05em; }
+.subtitle { color: #7a6f66; font-size: 0.95rem; margin-top: -0.5rem; }
+h1, h2, h3, p, span, label, div { color: #4a3f36; }
 div[data-testid="stMetric"] {
-    background-color: #161b26;
-    border: 1px solid #262d3a;
+    background-color: #fbf6f0;
+    border: 1px solid #e3d5c7;
     border-radius: 10px;
     padding: 1rem 1.2rem;
 }
-div[data-testid="stMetric"] label { color: #9ca3af !important; }
-div[data-testid="stMetricValue"] { color: #f2643a; }
+div[data-testid="stMetric"] label { color: #8a7a6d !important; }
+div[data-testid="stMetricValue"] { color: #b5654a; }
 .block-card {
-    background-color: #161b26;
-    border: 1px solid #262d3a;
+    background-color: #fbf6f0;
+    border: 1px solid #e3d5c7;
     border-radius: 10px;
     padding: 1.2rem 1.4rem;
     margin-bottom: 1rem;
@@ -57,7 +58,6 @@ def load_data(file):
 
     df = df.dropna(subset=["SMT P/N"])
 
-    # Build a long-format "notices" table: one row per active station flag
     records = []
     for i in range(1, 21):
         scol = f"S{i}"
@@ -76,10 +76,8 @@ def load_data(file):
 
 notices = load_data(uploaded_file)
 
-# Sort lines numerically (S1, S2, ... S20) instead of alphabetically
 line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 
-# ---- 2. KPI METRICS ----
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total notices", len(notices))
 k2.metric("Boards affected", notices["PCB P/N"].nunique())
@@ -88,7 +86,6 @@ k4.metric("Active lines", notices["Line"].nunique())
 
 st.write("")
 
-# ---- 3. HEATMAP + SIDE BARS ----
 left, right = st.columns([2, 1])
 
 with left:
@@ -105,12 +102,12 @@ with left:
         x=pivot.columns,
         y=pivot.index,
         text_auto=True,
-        color_continuous_scale="Oranges",
+        color_continuous_scale=[[0, "#fbf6f0"], [1, "#b5654a"]],
         aspect="auto",
     )
     fig.update_layout(
-        plot_bgcolor="#161b26", paper_bgcolor="#161b26",
-        font_color="#e5e7eb",
+        plot_bgcolor="#fbf6f0", paper_bgcolor="#fbf6f0",
+        font_color="#4a3f36",
         coloraxis_showscale=False,
         margin=dict(l=0, r=0, t=10, b=0),
     )
@@ -122,9 +119,9 @@ with right:
     st.markdown("**Notices by customer**")
     by_cust = notices.groupby("Customer").size().sort_values(ascending=True)
     fig2 = go.Figure(go.Bar(x=by_cust.values, y=by_cust.index, orientation="h",
-                             marker_color="#f2643a", text=by_cust.values, textposition="outside"))
+                             marker_color="#b5654a", text=by_cust.values, textposition="outside"))
     fig2.update_layout(
-        plot_bgcolor="#161b26", paper_bgcolor="#161b26", font_color="#e5e7eb",
+        plot_bgcolor="#fbf6f0", paper_bgcolor="#fbf6f0", font_color="#4a3f36",
         margin=dict(l=0, r=0, t=10, b=0), height=180,
         xaxis=dict(visible=False), yaxis=dict(showgrid=False),
     )
@@ -133,16 +130,15 @@ with right:
     st.markdown("**Top lines by volume**")
     by_line = notices.groupby("Line").size().sort_values(ascending=False).head(8).sort_values(ascending=True)
     fig3 = go.Figure(go.Bar(x=by_line.values, y=by_line.index, orientation="h",
-                             marker_color="#3b82f6", text=by_line.values, textposition="outside"))
+                             marker_color="#a68a6d", text=by_line.values, textposition="outside"))
     fig3.update_layout(
-        plot_bgcolor="#161b26", paper_bgcolor="#161b26", font_color="#e5e7eb",
+        plot_bgcolor="#fbf6f0", paper_bgcolor="#fbf6f0", font_color="#4a3f36",
         margin=dict(l=0, r=0, t=10, b=0), height=260,
         xaxis=dict(visible=False), yaxis=dict(showgrid=False),
     )
     st.plotly_chart(fig3, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---- 4. FILTERABLE NOTICE RECORDS TABLE ----
 st.markdown('<div class="block-card">', unsafe_allow_html=True)
 st.markdown("**Notice records**")
 st.caption("Search by board, part number, model, or rev.")
