@@ -58,6 +58,7 @@ def load_data(file):
 
     df = df.dropna(subset=["SMT P/N"])
 
+    # Build a long-format "notices" table: one row per active station flag
     records = []
     for i in range(1, 21):
         scol = f"S{i}"
@@ -76,8 +77,10 @@ def load_data(file):
 
 notices = load_data(uploaded_file)
 
+# Sort lines numerically (S1, S2, ... S20) instead of alphabetically
 line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 
+# ---- 2. KPI METRICS ----
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total notices", len(notices))
 k2.metric("Boards affected", notices["PCB P/N"].nunique())
@@ -86,6 +89,7 @@ k4.metric("Active lines", notices["Line"].nunique())
 
 st.write("")
 
+# ---- 3. HEATMAP + SIDE BARS ----
 left, right = st.columns([2, 1])
 
 with left:
@@ -93,8 +97,7 @@ with left:
     st.markdown("**Notices by customer × line**")
     st.caption("Darker = more notices.")
 
-    pivot = notices.pivot_table(index="Customer", columns="Line", values="Line",
-                                 aggfunc="count", fill_value=0)
+    pivot = pd.crosstab(notices["Customer"], notices["Line"])
     pivot = pivot.reindex(columns=line_order, fill_value=0)
 
     fig = px.imshow(
@@ -139,6 +142,7 @@ with right:
     st.plotly_chart(fig3, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+# ---- 4. FILTERABLE NOTICE RECORDS TABLE ----
 st.markdown('<div class="block-card">', unsafe_allow_html=True)
 st.markdown("**Notice records**")
 st.caption("Search by board, part number, model, or rev.")
