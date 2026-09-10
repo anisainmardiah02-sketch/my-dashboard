@@ -72,12 +72,19 @@ def load_data(file):
         records.append(sub)
 
     notices = pd.concat(records, ignore_index=True) if records else pd.DataFrame()
-    return notices
+
+    # Process flow (which SMT/DIP steps each board uses), from the Direction Board tab
+    flow = pd.read_excel(xls, sheet_name="Direction Board", header=2)
+    process_cols = ["Loader", "Printer", "SPI/Pre-AOI/Post AOI", "Mounter", "Side Insert",
+                     "Reflow", "Router", "Auto-Insertion", "Wave solder", "Press-fit", "AXI", "Final-AOI"]
+    flow = flow[["PCB P/N"] + process_cols].drop_duplicates(subset="PCB P/N")
+
+    notices = notices.merge(flow, on="PCB P/N", how="left")
+    return notices, process_cols
 
 
-notices = load_data(uploaded_file)
+notices, process_cols = load_data(uploaded_file)
 
-# Sort lines numerically (S1, S2, ... S20) instead of alphabetically
 line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 
 # ---- 2. KPI METRICS ----
@@ -142,7 +149,44 @@ with right:
     st.plotly_chart(fig3, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---- 4. FILTERABLE NOTICE RECORDS TABLE ----
+# ---- 4. PROCESS FLOW (SMT & DIP) ----
+st.markdown('<div class="block-card">', unsafe_allow_html=True)
+st.markdown("**Process flow — SMT & DIP**")
+st.caption("Which process steps this board runs through.")
+
+board_options = notices[["PCB P/N", "PCB Board Name"]].drop_duplicates()
+board_options["label"] = board_options["PCB P/N"] + " — " + board_options["PCB Board Name"]
+chosen_label = st.selectbox("Choose a board", board_options["label"].tolist())
+chosen_pn = chosen_label.split(" — ")[0]
+
+board_row = notices[notices["PCB P/N"] == chosen_pn].iloc[0]
+
+smt_steps = ["Loader", "Printer", "SPI/Pre-AOI/Post AOI", "Mounter", "Side Insert",
+             "Reflow", "Router", "AXI", "Final-AOI"]
+dip_steps = ["Auto-Insertion", "Wave solder", "Press-fit"]
+
+
+def render_flow(steps, row):
+    pills = []
+    for step in steps:
+        active = bool(row.get(step, False))
+        color = "#b5654a" if active else "#d8cfc6"
+        bg = "#fbf6f0" if active else "#f0eae3"
+        weight = "700" if active else "400"
+        pills.append(
+            f'<span style="display:inline-block;margin:4px;padding:6px 12px;'
+            f'border-radius:20px;border:2px solid {color};background:{bg};'
+            f'color:{color};font-weight:{weight};font-size:0.85rem;">{step}</span>'
+        )
+    return " → ".join(pills)
+
+
+st.markdown("*SMT:*  " + render_flow(smt_steps, board_row), unsafe_allow_html=True)
+st.write("")
+st.markdown("*DIP:*  " + render_flow(dip_steps, board_row), unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ---- 5. FILTERABLE NOTICE RECORDS TABLE ----
 st.markdown('<div class="block-card">', unsafe_allow_html=True)
 st.markdown("**Notice records**")
 st.caption("Search by board, part number, model, or rev.")
