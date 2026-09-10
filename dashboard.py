@@ -77,6 +77,7 @@ def load_data(file):
 
 notices = load_data(uploaded_file)
 
+# Sort lines numerically (S1, S2, ... S20) instead of alphabetically
 line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 
 # ---- 2. KPI METRICS ----
@@ -173,8 +174,14 @@ if search:
     table = table[mask]
 
 display_cols = ["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", "DIP P/N", "FG P/N", "Line", "Rev"]
-st.dataframe(
-    table[display_cols].rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"}),
-    use_container_width=True, hide_index=True,
+display_table = table[display_cols].rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"})
+
+st.download_button(
+    label="⬇ Download filtered records (CSV)",
+    data=display_table.to_csv(index=False).encode("utf-8"),
+    file_name="notice_records.csv",
+    mime="text/csv",
 )
+
+st.dataframe(display_table, use_container_width=True, hide_index=True)
 st.markdown("</div>", unsafe_allow_html=True)
