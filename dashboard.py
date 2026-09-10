@@ -66,7 +66,7 @@ def load_data(file):
         if scol not in df.columns:
             continue
         active = df[scol].fillna(0).astype(bool)
-        sub = df[active][["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", rcol]].copy()
+        sub = df[active][["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", "DIP P/N", "FG P/N", rcol]].copy()
         sub["Line"] = f"S{i}"
         sub = sub.rename(columns={rcol: "Rev"})
         records.append(sub)
@@ -77,7 +77,6 @@ def load_data(file):
 
 notices = load_data(uploaded_file)
 
-# Sort lines numerically (S1, S2, ... S20) instead of alphabetically
 line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 
 # ---- 2. KPI METRICS ----
@@ -166,11 +165,14 @@ if search:
         table["PCB Board Name"].astype(str).str.lower().str.contains(s)
         | table["Model"].astype(str).str.lower().str.contains(s)
         | table["PCB P/N"].astype(str).str.lower().str.contains(s)
+        | table["SMT P/N"].astype(str).str.lower().str.contains(s)
+        | table["DIP P/N"].astype(str).str.lower().str.contains(s)
+        | table["FG P/N"].astype(str).str.lower().str.contains(s)
         | table["Rev"].astype(str).str.lower().str.contains(s)
     )
     table = table[mask]
 
-display_cols = ["Customer", "Model", "PCB Board Name", "PCB P/N", "Line", "Rev"]
+display_cols = ["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", "DIP P/N", "FG P/N", "Line", "Rev"]
 st.dataframe(
     table[display_cols].rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"}),
     use_container_width=True, hide_index=True,
