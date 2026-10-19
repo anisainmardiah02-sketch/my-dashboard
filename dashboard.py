@@ -87,6 +87,34 @@ notices, process_cols = load_data(uploaded_file)
 line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
 customers = sorted(notices["Customer"].unique())
 
+# ---- CUSTOMER COLOURS ----
+# (light tint, strong colour) per customer, matched by name in any capitalisation.
+# A new customer that is not listed here automatically gets one of the spare colours.
+CUSTOMER_COLORS = {
+    "amber": ("#cfe0f4", "#2f6fb5"),   # blue
+    "fiona": ("#fbd9b8", "#e07b24"),   # orange
+    "monica": ("#e0d0f0", "#7a4fa3"),  # purple
+}
+SPARE_COLORS = [("#cfe8dc", "#3f8f6b"), ("#f4d3dc", "#c2506f"), ("#e2e2e2", "#6b6b6b")]
+_spare = iter(SPARE_COLORS * 10)
+COLOR_OF = {c: CUSTOMER_COLORS.get(str(c).strip().lower()) or next(_spare) for c in customers}
+
+
+def blend(light, dark, t):
+    """Colour between `light` (t=0) and `dark` (t=1), e.g. more notices = stronger colour."""
+    a = [int(light[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(dark[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(round(x + (y - x) * t) for x, y in zip(a, b))
+
+
+def style_customers(df):
+    """Colour the Customer column of a table to match the charts."""
+    def paint(v):
+        light, dark = COLOR_OF.get(v, ("#eeeeee", "#555555"))
+        return f"background-color: {light}; color: {dark}; font-weight: 600;"
+    return df.style.map(paint, subset=["Customer"])
+
+
 # ---- 2. KPI METRICS ----
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Total notices", len(notices))
@@ -124,19 +152,28 @@ left, right = st.columns([2, 1])
 
 with left:
     st.markdown("**Notices by customer × line**")
-    st.caption("Darker = more notices. Click a number to list its notices below.")
+    st.caption("Stronger colour = more notices. Click a number to list its notices below.")
+
+    legend = " &nbsp;&nbsp; ".join(
+        f'<span style="color:{COLOR_OF[c][1]};font-weight:700;">● {c}</span>' for c in customers
+    )
+    st.markdown(legend, unsafe_allow_html=True)
 
     max_count = cells["Count"].max()
+    tile_colors, text_colors = [], []
+    for cust, cnt in zip(cells["Customer"], cells["Count"]):
+        light, dark = COLOR_OF[cust]
+        t = max(cnt / max_count, 0.15)
+        tile_colors.append(blend(light, dark, t))
+        text_colors.append("#ffffff" if t > 0.5 else CHART_TEXT)
+
     fig_grid = go.Figure(go.Scatter(
         x=cells["Line"], y=cells["Customer"],
         mode="markers+text",
         text=cells["Count"].astype(str),
         textposition="middle center",
-        textfont=dict(size=12, color=["#ffffff" if c > 0.55 * max_count else CHART_TEXT for c in cells["Count"]]),
-        marker=dict(
-            symbol="square", size=34, color=cells["Count"],
-            colorscale=[[0, "#f1ddcc"], [1, "#b5654a"]], showscale=False, line=dict(width=0),
-        ),
+        textfont=dict(size=12, color=text_colors),
+        marker=dict(symbol="square", size=34, color=tile_colors, line=dict(width=0)),
         hovertemplate="%{y} · %{x}<br>%{text} notices<extra></extra>",
         selected=dict(marker=dict(opacity=1)),
         unselected=dict(marker=dict(opacity=0.5), textfont=dict(color=CHART_TEXT)),
@@ -163,7 +200,7 @@ with right:
     st.markdown("**Notices by customer**")
     st.caption("Click a bar to list that customer's notices.")
     fig_cust = go.Figure(go.Bar(
-        x=by_cust.values, y=by_cust.index, orientation="h", marker_color="#b5654a",
+        x=by_cust.values, y=by_cust.index, orientation="h", marker_color=[COLOR_OF[c][1] for c in by_cust.index],
         text=by_cust.values, textposition="auto", cliponaxis=False,
         insidetextfont=dict(color="#ffffff"), outsidetextfont=dict(color=CHART_TEXT),
         hovertemplate="%{y}<br>%{x} notices<extra></extra>",
@@ -285,7 +322,7 @@ else:
         mime="text/csv",
         key="download_selected",
     )
-    st.dataframe(detail, use_container_width=True, hide_index=True)
+    st.dataframe(style_customers(detail), use_container_width=True, hide_index=True)
 
 # ---- 4. PROCESS FLOW (SMT & DIP) ----
 st.markdown('<div class="block-card">', unsafe_allow_html=True)
@@ -392,5 +429,5 @@ st.download_button(
     mime="text/csv",
 )
 
-st.dataframe(display_table, use_container_width=True, hide_index=True)
+st.dataframe(style_customers(display_table), use_container_width=True, hide_index=True)
 st.markdown("</div>", unsafe_allow_html=True)
