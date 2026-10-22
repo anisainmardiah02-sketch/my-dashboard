@@ -1,433 +1,258 @@
+import re
+
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 
-st.set_page_config(page_title="PCB Notice Dashboard", layout="wide")
+st.set_page_config(page_title="Weekly Line Schedule", layout="wide")
 
-# ---- NUDE THEME STYLING ----
+# ---- NUDE PURPLE THEME ----
 st.markdown("""
 <style>
-.stApp { background-color: #f5ede4; }
-.eyebrow { color: #b5654a; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.05em; }
-.subtitle { color: #7a6f66; font-size: 0.95rem; margin-top: -0.5rem; }
-h1, h2, h3, p, span, label, div { color: #4a3f36; }
+.stApp { background-color: #f3ede9; }
+h1, h2, h3, p, span, label, div { color: #4a3f4a; }
 div[data-testid="stMetric"] {
-    background-color: #fbf6f0;
-    border: 1px solid #e3d5c7;
+    background-color: #f9f2f6;
+    border: 1px solid #e2d3de;
     border-radius: 10px;
     padding: 1rem 1.2rem;
 }
-div[data-testid="stMetric"] label { color: #8a7a6d !important; }
-div[data-testid="stMetricValue"] { color: #b5654a; }
-.block-card {
-    background-color: #fbf6f0;
-    border: 1px solid #e3d5c7;
-    border-radius: 10px;
-    padding: 1.2rem 1.4rem;
-    margin-bottom: 1rem;
-}
+div[data-testid="stMetric"] label { color: #8a7086 !important; }
+div[data-testid="stMetricValue"] { color: #8a5a8f; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="eyebrow">SMT MASTERLIST · ENGINEERING NOTICES</div>', unsafe_allow_html=True)
-st.markdown("# PCB Notice Dashboard")
-st.markdown('<div class="subtitle">Every board revision flagged with an active change notice, broken down by customer and production line. Click any number or bar to see the notices behind it.</div>', unsafe_allow_html=True)
-st.write("")
+# Words searched for in the Remark column. Each trigger type has its own pattern,
+# so people can write it in different ways (e.g. "Line Qual", "Internal build", "new PN").
+TRIGGER_PATTERNS = {
+    "Qual": r"qual",
+    "Internal build": r"internal",
+    "New PN": r"new\s*p/?n\b|new\s*part",
+    "Change from": r"chang(?:e|ed|es)\s+from",
+    "Transfer": r"transfer",
+    "First build": r"(?:first|1st)[\s-]*build",
+    "OQ build": r"\boq\b",
+}
+TRIGGER_TYPES = list(TRIGGER_PATTERNS.keys()) + ["Other keywords"]
+TRIGGER_LABEL = " / ".join(TRIGGER_PATTERNS.keys())
+
+st.markdown("# 🗓️ Weekly Line Schedule")
+st.caption(f"What model is running on each line, each day this week — with {TRIGGER_LABEL} runs flagged.")
 
 # ---- 1. UPLOAD FILE ----
-uploaded_file = st.file_uploader("Upload your PCBA Notice Information Excel file", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload your PD Schedule Excel file", type=["xlsx"])
 
 if not uploaded_file:
-    st.info("Upload your Excel file above to see the dashboard. Nothing is saved — it stays only in this session.")
+    st.info("Upload your schedule Excel file above. Nothing is saved — it stays only in this session.")
     st.stop()
 
 
-@st.cache_data
-def load_data(file):
-    xls = pd.ExcelFile(file)
-    sheet_name = next(s for s in xls.sheet_names if s.strip().lower() == "smt masterlist")
-    df = pd.read_excel(xls, sheet_name=sheet_name)
-
-    cut_idx = df.index[df["Customer"] == "REV"]
-    if len(cut_idx) > 0:
-        df = df.loc[: cut_idx[0] - 1]
-
-    for col in ["Customer", "Model", "PCB Board Name", "PCB P/N", "PCB REV", "Side"]:
-        df[col] = df[col].ffill()
-
-    df = df.dropna(subset=["SMT P/N"])
-
-    # Build a long-format "notices" table: one row per active station flag
-    records = []
-    for i in range(1, 21):
-        scol = f"S{i}"
-        rcol = "REV" if i == 1 else f"REV.{i - 1}"
-        if scol not in df.columns:
-            continue
-        active = df[scol].fillna(0).astype(bool)
-        sub = df[active][["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", "DIP P/N", "FG P/N", rcol]].copy()
-        sub["Line"] = f"S{i}"
-        sub = sub.rename(columns={rcol: "Rev"})
-        records.append(sub)
-
-    notices = pd.concat(records, ignore_index=True) if records else pd.DataFrame()
-
-    # Process flow (which SMT/DIP steps each board uses), from the Direction Board tab
-    flow = pd.read_excel(xls, sheet_name="Direction Board", header=2)
-    process_cols = ["Loader", "Printer", "SPI/Pre-AOI/Post AOI", "Mounter", "Side Insert",
-                     "Reflow", "Router", "Auto-Insertion", "Wave solder", "Press-fit", "AXI", "Final-AOI"]
-    flow = flow[["PCB P/N"] + process_cols].drop_duplicates(subset="PCB P/N")
-
-    notices = notices.merge(flow, on="PCB P/N", how="left")
-    return notices, process_cols
-
-
-notices, process_cols = load_data(uploaded_file)
-
-line_order = sorted(notices["Line"].unique(), key=lambda x: int(x[1:]))
-customers = sorted(notices["Customer"].unique())
-
-# ---- CUSTOMER COLOURS ----
-# (light tint, strong colour) per customer, matched by name in any capitalisation.
-# A new customer that is not listed here automatically gets one of the spare colours.
-CUSTOMER_COLORS = {
-    "amber": ("#cfe0f4", "#2f6fb5"),   # blue
-    "fiona": ("#fbd9b8", "#e07b24"),   # orange
-    "monica": ("#e0d0f0", "#7a4fa3"),  # purple
-}
-SPARE_COLORS = [("#cfe8dc", "#3f8f6b"), ("#f4d3dc", "#c2506f"), ("#e2e2e2", "#6b6b6b")]
-_spare = iter(SPARE_COLORS * 10)
-COLOR_OF = {c: CUSTOMER_COLORS.get(str(c).strip().lower()) or next(_spare) for c in customers}
-
-
-def blend(light, dark, t):
-    """Colour between `light` (t=0) and `dark` (t=1), e.g. more notices = stronger colour."""
-    a = [int(light[i:i + 2], 16) for i in (1, 3, 5)]
-    b = [int(dark[i:i + 2], 16) for i in (1, 3, 5)]
-    return "#%02x%02x%02x" % tuple(round(x + (y - x) * t) for x, y in zip(a, b))
-
-
-def style_customers(df):
-    """Colour the Customer column of a table to match the charts."""
-    def paint(v):
-        light, dark = COLOR_OF.get(v, ("#eeeeee", "#555555"))
-        return f"background-color: {light}; color: {dark}; font-weight: 600;"
-    return df.style.map(paint, subset=["Customer"])
-
-
-# ---- 2. KPI METRICS ----
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Total notices", len(notices))
-k2.metric("Boards affected", notices["PCB P/N"].nunique())
-k3.metric("Customers", notices["Customer"].nunique())
-k4.metric("Active lines", notices["Line"].nunique())
-
-st.write("")
-
-# ---- 3. CLICKABLE CHARTS ----
-# Each chart has a "version" number in its key. Bumping it gives the chart a fresh key,
-# which is how we clear a chart's selection.
-for k in ("grid", "cust", "line"):
-    st.session_state.setdefault(f"ver_{k}", 0)
-
-# The data behind each chart. The ORDER here matters: a click comes back as a position,
-# and we use that position to look up which customer / line was clicked.
-cells = notices.groupby(["Customer", "Line"]).size().reset_index(name="Count")
-cells["_cu"] = cells["Customer"].map({c: i for i, c in enumerate(customers)})
-cells["_ln"] = cells["Line"].map({l: i for i, l in enumerate(line_order)})
-cells = cells.sort_values(["_cu", "_ln"], kind="stable").reset_index(drop=True)
-
-by_cust = notices.groupby("Customer").size().sort_values(ascending=True, kind="stable")
-by_line = (
-    notices.groupby("Line").size()
-    .sort_values(ascending=False, kind="stable").head(8)
-    .sort_values(ascending=True, kind="stable")
-)
-
-CHART_BG = "#fbf6f0"
-CHART_TEXT = "#4a3f36"
-PLOT_CONFIG = {"displayModeBar": False}
-
-left, right = st.columns([2, 1])
-
-with left:
-    st.markdown("**Notices by customer × line**")
-    st.caption("Stronger colour = more notices. Click a number to list its notices below.")
-
-    legend = " &nbsp;&nbsp; ".join(
-        f'<span style="color:{COLOR_OF[c][1]};font-weight:700;">● {c}</span>' for c in customers
-    )
-    st.markdown(legend, unsafe_allow_html=True)
-
-    max_count = cells["Count"].max()
-    tile_colors, text_colors = [], []
-    for cust, cnt in zip(cells["Customer"], cells["Count"]):
-        light, dark = COLOR_OF[cust]
-        t = max(cnt / max_count, 0.15)
-        tile_colors.append(blend(light, dark, t))
-        text_colors.append("#ffffff" if t > 0.5 else CHART_TEXT)
-
-    fig_grid = go.Figure(go.Scatter(
-        x=cells["Line"], y=cells["Customer"],
-        mode="markers+text",
-        text=cells["Count"].astype(str),
-        textposition="middle center",
-        textfont=dict(size=12, color=text_colors),
-        marker=dict(symbol="square", size=34, color=tile_colors, line=dict(width=0)),
-        hovertemplate="%{y} · %{x}<br>%{text} notices<extra></extra>",
-        selected=dict(marker=dict(opacity=1)),
-        unselected=dict(marker=dict(opacity=0.5), textfont=dict(color=CHART_TEXT)),
-    ))
-    fig_grid.update_xaxes(
-        categoryorder="array", categoryarray=line_order, side="top",
-        showgrid=False, zeroline=False, fixedrange=True,
-    )
-    fig_grid.update_yaxes(
-        categoryorder="array", categoryarray=customers, autorange="reversed",
-        showgrid=False, zeroline=False, fixedrange=True, automargin=True,
-    )
-    fig_grid.update_layout(
-        plot_bgcolor=CHART_BG, paper_bgcolor=CHART_BG, font_color=CHART_TEXT,
-        margin=dict(l=0, r=0, t=10, b=0), dragmode=False,
-        height=max(200, 90 + 60 * len(customers)),
-    )
-    ev_grid = st.plotly_chart(
-        fig_grid, use_container_width=True, theme=None, on_select="rerun",
-        selection_mode="points", key=f"chart_grid_{st.session_state.ver_grid}", config=PLOT_CONFIG,
-    )
-
-with right:
-    st.markdown("**Notices by customer**")
-    st.caption("Click a bar to list that customer's notices.")
-    fig_cust = go.Figure(go.Bar(
-        x=by_cust.values, y=by_cust.index, orientation="h", marker_color=[COLOR_OF[c][1] for c in by_cust.index],
-        text=by_cust.values, textposition="auto", cliponaxis=False,
-        insidetextfont=dict(color="#ffffff"), outsidetextfont=dict(color=CHART_TEXT),
-        hovertemplate="%{y}<br>%{x} notices<extra></extra>",
-        selected=dict(marker=dict(opacity=1)), unselected=dict(marker=dict(opacity=0.4)),
-    ))
-    fig_cust.update_layout(
-        plot_bgcolor=CHART_BG, paper_bgcolor=CHART_BG, font_color=CHART_TEXT,
-        margin=dict(l=0, r=0, t=10, b=0), dragmode=False,
-        height=max(140, 50 + 45 * len(by_cust)),
-        xaxis=dict(visible=False, fixedrange=True), yaxis=dict(showgrid=False, fixedrange=True, automargin=True),
-    )
-    ev_cust = st.plotly_chart(
-        fig_cust, use_container_width=True, theme=None, on_select="rerun",
-        selection_mode="points", key=f"chart_cust_{st.session_state.ver_cust}", config=PLOT_CONFIG,
-    )
-
-    st.markdown("**Top lines by volume**")
-    st.caption("Click a bar to list that line's notices.")
-    fig_line = go.Figure(go.Bar(
-        x=by_line.values, y=by_line.index, orientation="h", marker_color="#a68a6d",
-        text=by_line.values, textposition="auto", cliponaxis=False,
-        insidetextfont=dict(color="#ffffff"), outsidetextfont=dict(color=CHART_TEXT),
-        hovertemplate="%{y}<br>%{x} notices<extra></extra>",
-        selected=dict(marker=dict(opacity=1)), unselected=dict(marker=dict(opacity=0.4)),
-    ))
-    fig_line.update_layout(
-        plot_bgcolor=CHART_BG, paper_bgcolor=CHART_BG, font_color=CHART_TEXT,
-        margin=dict(l=0, r=0, t=10, b=0), dragmode=False,
-        height=max(140, 40 + 27 * len(by_line)),
-        xaxis=dict(visible=False, fixedrange=True), yaxis=dict(showgrid=False, fixedrange=True, automargin=True),
-    )
-    ev_line = st.plotly_chart(
-        fig_line, use_container_width=True, theme=None, on_select="rerun",
-        selection_mode="points", key=f"chart_line_{st.session_state.ver_line}", config=PLOT_CONFIG,
-    )
-
-
-def picked(event):
-    """Positions of the points that are currently selected in a chart."""
+def line_sort_key(x):
     try:
-        points = event["selection"]["points"]
-    except Exception:
-        return ()
-    return tuple(sorted({p["point_index"] for p in points if p.get("curve_number", 0) == 0}))
+        return (0, int(str(x)[1:]))
+    except ValueError:
+        return (1, str(x))
 
 
-current = {"grid": picked(ev_grid), "cust": picked(ev_cust), "line": picked(ev_line)}
-previous = st.session_state.get("prev_sel", {"grid": (), "cust": (), "line": ()})
+@st.cache_data
+def load_schedule(file):
+    df = pd.read_excel(file, sheet_name="SMT Schedule", header=None)
 
-# Whichever chart was clicked most recently decides what the list below shows.
-changed = [k for k in current if current[k] and current[k] != previous.get(k, ())]
-if changed:
-    newest = changed[-1]
-    others = [k for k in current if k != newest and current[k]]
-    st.session_state["active"] = newest
-    st.session_state["prev_sel"] = {k: (current[k] if k == newest else ()) for k in current}
-    if others:
-        # Clear the other charts' highlights so only one selection is visible at a time
-        for k in others:
-            st.session_state[f"ver_{k}"] += 1
-        st.rerun()
-else:
-    st.session_state["prev_sel"] = current
-    active = st.session_state.get("active")
-    if not active or not current.get(active):
-        nonempty = [k for k in current if current[k]]
-        st.session_state["active"] = nonempty[-1] if nonempty else None
+    # Each day is its own column block; find them by locating "MO#" headers
+    header_row = df.iloc[1]
+    block_starts = [c for c in df.columns if str(header_row[c]).strip() == "MO#"]
 
-active = st.session_state.get("active")
+    # Line label (col 0) only appears on the first row of each MO group — carry it down
+    df[0] = df[0].ffill()
+
+    col_labels = ["MO#", "PN", "Description", "MO Qty", "Plan Qty", "MO status",
+                  "Release Date", "Pcs/Pnl", "UPH", "LT", "Remark"]
+
+    records = []
+    n_cols = df.shape[1]
+    for idx, bs in enumerate(block_starts):
+        date_val = pd.to_datetime(df.iloc[0, bs]).date()
+        weekday = df.iloc[0, bs + 1]
+
+        # Each block runs until the next block's "MO#" (or end of sheet) — width can vary
+        block_end = block_starts[idx + 1] if idx + 1 < len(block_starts) else n_cols
+
+        # Find each expected column by matching its header text within this block's range,
+        # instead of assuming a fixed column offset (layouts sometimes shift between files)
+        col_map = {}
+        for c in range(bs, block_end):
+            label = str(header_row[c]).strip()
+            if label in col_labels and label not in col_map:
+                col_map[label] = c
+
+        block = pd.DataFrame(index=df.index[2:])
+        for lbl in col_labels:
+            if lbl in col_map:
+                block[lbl] = df.iloc[2:, col_map[lbl]]
+            else:
+                block[lbl] = pd.NA
+        block.insert(0, "Line", df.iloc[2:, 0])
+
+        block["Date"] = date_val
+        block["Weekday"] = weekday
+        records.append(block)
+
+    sched = pd.concat(records, ignore_index=True)
+    sched = sched.dropna(subset=["MO#"])
+    return sched
 
 
-def clear_selection():
-    for k in ("grid", "cust", "line"):
-        st.session_state[f"ver_{k}"] += 1
-    st.session_state["prev_sel"] = {"grid": (), "cust": (), "line": ()}
-    st.session_state["active"] = None
+def find_triggers(remark, extra_words):
+    """Return (list of trigger types found, the remark line that mentions it)."""
+    if pd.isna(remark):
+        return [], ""
+    text = str(remark)
+    found = [name for name, pat in TRIGGER_PATTERNS.items() if re.search(pat, text, re.IGNORECASE)]
+    if any(w in text.lower() for w in extra_words):
+        found.append("Other keywords")
+
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    snippet = lines[0] if lines else ""
+    for ln in lines:
+        hit = any(re.search(p, ln, re.IGNORECASE) for p in TRIGGER_PATTERNS.values())
+        if hit or any(w in ln.lower() for w in extra_words):
+            snippet = ln
+            break
+    return found, snippet[:120]
 
 
-# ---- 3b. NOTICES BEHIND THE CLICKED NUMBER / BAR ----
-if not active:
-    st.markdown("**Selected notices**")
-    st.caption("👆 Click a number in the customer × line grid, or a bar, to see the models, revisions and part numbers behind it.")
-else:
-    if active == "grid":
-        pairs = [(cells.iloc[i]["Customer"], cells.iloc[i]["Line"]) for i in current["grid"]]
-        mask = pd.MultiIndex.from_frame(notices[["Customer", "Line"]]).isin(pairs)
-        title = ", ".join(f"{c} × {l}" for c, l in pairs) if len(pairs) <= 4 else f"{len(pairs)} cells"
-    elif active == "cust":
-        names = [by_cust.index[i] for i in current["cust"]]
-        mask = notices["Customer"].isin(names)
-        title = ", ".join(names)
-    else:
-        names = [by_line.index[i] for i in current["line"]]
-        mask = notices["Line"].isin(names)
-        title = ", ".join(names)
+sched = load_schedule(uploaded_file)
+line_order = sorted(sched["Line"].dropna().unique(), key=line_sort_key)
+dates = sorted(sched["Date"].unique())
 
-    picked_rows = notices[mask].copy()
-    picked_rows["_ln"] = picked_rows["Line"].map({l: i for i, l in enumerate(line_order)})
-    picked_rows = picked_rows.sort_values(["Customer", "Model", "_ln", "Rev"], kind="stable")
-
-    head_l, head_r = st.columns([4, 1])
-    with head_l:
-        st.markdown(f"**Selected notices — {title}**")
-        st.caption(
-            f"{len(picked_rows)} notices · {picked_rows['PCB P/N'].nunique()} boards · "
-            f"{picked_rows['Model'].nunique()} models"
-        )
-    with head_r:
-        st.button("✕ Clear selection", on_click=clear_selection, key="clear_sel")
-
-    detail = picked_rows[["Customer", "Model", "Rev", "PCB Board Name", "PCB P/N",
-                           "Line", "SMT P/N", "DIP P/N", "FG P/N"]].rename(
-        columns={"PCB Board Name": "Board", "PCB P/N": "P/N"})
-
-    st.download_button(
-        label="⬇ Download these notices (CSV)",
-        data=detail.to_csv(index=False).encode("utf-8"),
-        file_name="selected_notices.csv",
-        mime="text/csv",
-        key="download_selected",
+# ---- 2. TRIGGER SETTINGS ----
+with st.expander("⚙️ Trigger settings — what counts as a flagged run"):
+    st.write(
+        "The Remark column is scanned for: **Qual** (e.g. Line Qual), "
+        "**Internal build** (the word 'internal'), "
+        "**New PN** ('new PN', 'new P/N', 'new part'), "
+        "**Change from** ('change from', 'changed from'), "
+        "**Transfer**, **First build** ('first build', '1st build'), "
+        "and **OQ build** (the word 'OQ', e.g. 'OQ build')."
     )
-    st.dataframe(style_customers(detail), use_container_width=True, hide_index=True)
+    extra_text = st.text_input(
+        "Extra trigger words (comma-separated)", "",
+        help="Add any other word people use, e.g. control run, pilot, trial",
+    )
+extra_words = [w.strip().lower() for w in extra_text.split(",") if w.strip()]
 
-# ---- 4. PROCESS FLOW (SMT & DIP) ----
-st.markdown('<div class="block-card">', unsafe_allow_html=True)
-st.markdown("**Process flow — SMT & DIP**")
-st.caption("Which process steps this board runs through.")
+results = sched["Remark"].apply(lambda r: find_triggers(r, extra_words))
+sched["Trigger"] = results.apply(lambda x: ", ".join(x[0]))
+sched["Snippet"] = results.apply(lambda x: x[1])
+sched["Flagged"] = sched["Trigger"] != ""
 
-board_options = notices[["PCB P/N", "PCB Board Name"]].drop_duplicates()
-board_options["label"] = board_options["PCB P/N"] + " — " + board_options["PCB Board Name"]
-chosen_label = st.selectbox("Choose a board", board_options["label"].tolist())
-chosen_pn = chosen_label.split(" — ")[0]
+flagged = sched[sched["Flagged"]]
+if len(flagged) > 0:
+    groups = (
+        flagged.groupby(["Line", "MO#", "Description", "Trigger", "Snippet"], dropna=False)
+        .agg(First=("Date", "min"), Last=("Date", "max"))
+        .reset_index()
+    )
+    groups = groups.assign(
+        _key=[(g.First, line_sort_key(g.Line)) for g in groups.itertuples()]
+    ).sort_values("_key").drop(columns="_key")
+else:
+    groups = flagged
 
-board_row = notices[notices["PCB P/N"] == chosen_pn].iloc[0]
+# ---- 3. KPI METRICS ----
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Total MOs this week", len(sched))
+k2.metric("Active lines", sched["Line"].nunique())
+k3.metric("Days covered", sched["Date"].nunique())
+k4.metric("⚠️ Flagged MOs", len(groups))
 
-smt_steps = ["Loader", "Printer", "SPI/Pre-AOI/Post AOI", "Mounter", "Side Insert", "Reflow"]
-dip_steps = ["Router", "Auto-Insertion", "Wave solder", "Press-fit", "AXI", "Final-AOI"]
-
-
-def render_flow(steps, row):
-    pills = []
-    for step in steps:
-        is_active = bool(row.get(step, False))
-        color = "#b5654a" if is_active else "#d8cfc6"
-        bg = "#fbf6f0" if is_active else "#f0eae3"
-        weight = "700" if is_active else "400"
-        pills.append(
-            f'<span style="display:inline-block;margin:4px;padding:6px 12px;'
-            f'border-radius:20px;border:2px solid {color};background:{bg};'
-            f'color:{color};font-weight:{weight};font-size:0.85rem;">{step}</span>'
-        )
-    return " → ".join(pills)
-
-
-st.markdown("*SMT:*  " + render_flow(smt_steps, board_row), unsafe_allow_html=True)
 st.write("")
-st.markdown("*DIP:*  " + render_flow(dip_steps, board_row), unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
 
-# ---- 4b. FIND BOARDS BY PROCESS STEP ----
-st.markdown('<div class="block-card">', unsafe_allow_html=True)
-st.markdown("**Find boards by process step**")
-st.caption("Pick a process step to see every model/board that runs through it.")
+# ---- 4. FLAGGED RUNS ALERT BANNER ----
+if len(groups) > 0:
+    st.error(f"⚠️ {len(groups)} flagged MO(s) this week ({TRIGGER_LABEL}) — check before releasing.")
+    for _, g in groups.iterrows():
+        if g["First"] == g["Last"]:
+            when = g["First"].strftime("%d %b")
+        else:
+            when = f"{g['First'].strftime('%d %b')} – {g['Last'].strftime('%d %b')}"
+        st.markdown(
+            f"- **{g['Line']}** · {when} · MO# `{g['MO#']}` · {g['Description']} — "
+            f"**{g['Trigger']}** — _{g['Snippet']}_"
+        )
+else:
+    st.success(f"✅ No {TRIGGER_LABEL} runs flagged this week.")
 
-step_choice = st.selectbox("Process step", process_cols)
+st.write("")
 
-step_boards = (
-    notices[notices[step_choice] == True]
-    [["Customer", "Model", "PCB Board Name", "PCB P/N"]]
-    .drop_duplicates()
-    .rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"})
-    .sort_values(["Customer", "Model"])
+# ---- 5. LINE × DATE MODEL GRID ----
+st.subheader("Model running by line and day")
+
+pivot_desc = (
+    sched.groupby(["Line", "Date"])["Description"]
+    .apply(lambda x: "; ".join(sorted(set(str(v).strip() for v in x))))
+    .unstack(fill_value="")
+    .reindex(index=line_order, columns=dates, fill_value="")
+)
+pivot_flag = (
+    sched.groupby(["Line", "Date"])["Flagged"]
+    .any()
+    .unstack(fill_value=False)
+    .reindex(index=line_order, columns=dates, fill_value=False)
 )
 
-st.write(f"**{len(step_boards)}** board(s) use **{step_choice}**")
+# Format date column headers nicely
+pivot_desc.columns = [d.strftime("%a %m/%d") for d in pivot_desc.columns]
+pivot_flag.columns = pivot_desc.columns
 
-st.download_button(
-    label=f"⬇ Download boards using {step_choice} (CSV)",
-    data=step_boards.to_csv(index=False).encode("utf-8"),
-    file_name=f"boards_using_{step_choice.replace('/', '-')}.csv",
-    mime="text/csv",
-    key="download_by_step",
+
+def highlight_flagged(_):
+    return pivot_flag.map(lambda v: "background-color: #e6c9e0; font-weight: 600;" if v else "")
+
+
+st.dataframe(
+    pivot_desc.style.apply(highlight_flagged, axis=None),
+    use_container_width=True,
 )
+st.caption(f"🟪 Highlighted cells contain a flagged run ({TRIGGER_LABEL}) that day.")
 
-st.dataframe(step_boards, use_container_width=True, hide_index=True)
-st.markdown("</div>", unsafe_allow_html=True)
+st.write("")
 
-# ---- 5. FILTERABLE NOTICE RECORDS TABLE ----
-st.markdown('<div class="block-card">', unsafe_allow_html=True)
-st.markdown("**Notice records**")
-st.caption("Search by board, part number, model, or rev.")
+# ---- 6. FILTERABLE DETAIL TABLE ----
+st.subheader("Full schedule detail")
 
 f1, f2, f3 = st.columns([1, 1, 2])
 with f1:
-    cust_filter = st.selectbox("Customer", ["All customers"] + customers)
-with f2:
     line_filter = st.selectbox("Line", ["All lines"] + line_order)
+with f2:
+    trigger_filter = st.selectbox("Show", ["All runs", "Any flagged"] + TRIGGER_TYPES)
 with f3:
-    search = st.text_input("Search board, model, P/N, rev...", "")
+    search = st.text_input("Search MO#, PN, description...", "")
 
-table = notices.copy()
-if cust_filter != "All customers":
-    table = table[table["Customer"] == cust_filter]
+table = sched.copy()
 if line_filter != "All lines":
     table = table[table["Line"] == line_filter]
+if trigger_filter == "Any flagged":
+    table = table[table["Flagged"]]
+elif trigger_filter != "All runs":
+    table = table[table["Trigger"].str.contains(trigger_filter, regex=False)]
 if search:
     s = search.lower()
     mask = (
-        table["PCB Board Name"].astype(str).str.lower().str.contains(s)
-        | table["Model"].astype(str).str.lower().str.contains(s)
-        | table["PCB P/N"].astype(str).str.lower().str.contains(s)
-        | table["SMT P/N"].astype(str).str.lower().str.contains(s)
-        | table["DIP P/N"].astype(str).str.lower().str.contains(s)
-        | table["FG P/N"].astype(str).str.lower().str.contains(s)
-        | table["Rev"].astype(str).str.lower().str.contains(s)
+        table["MO#"].astype(str).str.lower().str.contains(s)
+        | table["PN"].astype(str).str.lower().str.contains(s)
+        | table["Description"].astype(str).str.lower().str.contains(s)
     )
     table = table[mask]
 
-display_cols = ["Customer", "Model", "PCB Board Name", "PCB P/N", "SMT P/N", "DIP P/N", "FG P/N", "Line", "Rev"]
-display_table = table[display_cols].rename(columns={"PCB Board Name": "Board", "PCB P/N": "P/N"})
+display_cols = ["Line", "Date", "Weekday", "MO#", "PN", "Description",
+                 "MO Qty", "Plan Qty", "MO status", "Trigger"]
+display_table = table[display_cols].sort_values(["Date", "Line"])
 
 st.download_button(
-    label="⬇ Download filtered records (CSV)",
+    "⬇ Download filtered schedule (CSV)",
     data=display_table.to_csv(index=False).encode("utf-8"),
-    file_name="notice_records.csv",
+    file_name="line_schedule.csv",
     mime="text/csv",
 )
 
-st.dataframe(style_customers(display_table), use_container_width=True, hide_index=True)
-st.markdown("</div>", unsafe_allow_html=True)
+st.dataframe(display_table, use_container_width=True, hide_index=True)
